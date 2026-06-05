@@ -295,6 +295,13 @@ def handle_report(report: Path):
         persistent = get_persistent_dir()
         if persistent:
             dest = persistent / report.name
+            if dest.exists():
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                dest = persistent / f"{report.stem}_{timestamp}{report.suffix}"
+                counter = 1
+                while dest.exists():
+                    dest = persistent / f"{report.stem}_{timestamp}_{counter}{report.suffix}"
+                    counter += 1
             try:
                 shutil.move(str(report), str(dest))
                 log.warning(f"  Saved to USB: {dest}")
