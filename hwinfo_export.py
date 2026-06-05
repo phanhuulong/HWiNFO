@@ -77,89 +77,76 @@ def find_report(since: float) -> Path | None:
 
 
 def connect_app():
-    from pywinauto import Application
-    for i in range(20):
-        time.sleep(1)
-        try:
-            app = Application(backend="uia").connect(path=str(HWINFO_EXE), timeout=2)
-            log.info(f"Connected (attempt {i+1})")
-            return app
-        except Exception as e:
-            log.debug(f"  connect {i+1}: {e}")
-    raise RuntimeError("Cannot connect to HWiNFO64")
+    try:
+        import uiautomation as auto
+    except ImportError:
+        log.error("uiautomation not installed. Please run: pip install uiautomation")
+        sys.exit(1)
+    
+    # Giảm thời gian chờ mặc định của uiautomation để tránh treo script
+    auto.SetGlobalSearchTimeout(2.0)
+    log.info("Connected to uiautomation backend")
+    return auto
 
 
-def get_main_window(app, timeout=30):
+def get_main_window(timeout=30):
+    import uiautomation as auto
     deadline = time.time() + timeout
     while time.time() < deadline:
-        wins = app.windows()
-        for w in wins:
-            if "hwinfo" in w.window_text().lower():
+        # Quét các cửa sổ top-level chứa chữ hwinfo
+        for w in auto.GetRootControl().GetChildren():
+            if w.ControlType == auto.ControlType.WindowControl and w.Name and "hwinfo" in w.Name.lower():
                 return w
         time.sleep(1)
     raise RuntimeError("HWiNFO main window not found")
 
 
-def close_system_summary(app, main):
-    from pywinauto.keyboard import send_keys
+def close_system_summary():
+    import uiautomation as auto
     deadline = time.time() + 8  # Tăng thời gian chờ lên 8 giây (đề phòng WinPE load chậm)
     while time.time() < deadline:
         closed_something = False
         
-        # 1. Tìm ở top-level
-        for w in app.windows():
-            t = w.window_text()
-            if t and "summary" in t.lower():
-                log.info(f"  Closing top-level: '{t}'")
+        # Quét các cửa sổ đang mở để tìm System Summary
+        for w in auto.GetRootControl().GetChildren():
+            if w.ControlType == auto.ControlType.WindowControl and w.Name and "summary" in w.Name.lower():
+                log.info(f"  Closing System Summary: '{w.Name}'")
                 try:
-                    w.set_focus()
-                    send_keys("{ESC}")
+                    w.SetFocus()
+                    auto.SendKeys('{ESC}')
                     time.sleep(0.5)
-                    w.close()
                 except Exception:
                     pass
                 closed_something = True
 
-        # 2. Tìm ở cửa sổ con (children)
-        for child in main.descendants(control_type="Window"):
-            t = child.window_text()
-            if t and "summary" in t.lower():
-                log.info(f"  Closing child: '{t}'")
-                try:
-                    child.set_focus()
-                    send_keys("{ESC}")
-                    time.sleep(0.5)
-                    child.close()
-                except Exception:
-                    pass
-                closed_something = True
-                
         if closed_something:
             time.sleep(1)
-            return  # Đã đóng thành công, thoát hàm
+            return  # Đã đóng thành công
             
-        time.sleep(1) # Chờ 1 giây rồi quét lại nếu chưa thấy System Summary hiện ra
+        time.sleep(1)
         
     log.debug("  System Summary not open or already closed")
 
 
-def find_child_dialog(app, main, keywords, timeout=15):
+def find_child_dialog(main, keywords, timeout=15):
+    import uiautomation as auto
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for w in app.windows():
-            t = w.window_text()
-            if t and any(k.lower() in t.lower() for k in keywords):
-                log.info(f"  Dialog found (top-level): '{t}'")
+        # 1. Tìm ở top-level
+        for w in auto.GetRootControl().GetChildren():
+            if w.ControlType == auto.ControlType.WindowControl and w.Name and any(k.lower() in w.Name.lower() for k in keywords):
+                log.info(f"  Dialog found (top-level): '{w.Name}'")
                 return w
-        for ctrl in main.descendants(control_type="Window"):
-            t = ctrl.window_text()
-            if t and any(k.lower() in t.lower() for k in keywords):
-                log.info(f"  Dialog found (child): '{t}'")
-                return ctrl
+                
+        # 2. Tìm bên trong main window
+        if main and main.Exists(0, 0):
+            for child in main.GetChildren():
+                if child.ControlType == auto.ControlType.WindowControl and child.Name and any(k.lower() in child.Name.lower() for k in keywords):
+                    log.info(f"  Dialog found (child): '{child.Name}'")
+                    return child
+                    
         time.sleep(0.5)
-    children = [c.window_text() for c in main.descendants(control_type="Window")]
-    top_level = [w.window_text() for w in app.windows()]
-    raise RuntimeError(f"Dialog {keywords} not found.\nTop-level: {top_level}\nChildren: {children}")
+    raise RuntimeError(f"Dialog {keywords} not found.")
 
 
 # =========================
@@ -348,7 +335,7 @@ def show_result(success: bool, message: str):
 # MAIN AUTOMATION
 # =========================
 def run():
-    from pywinauto.keyboard import send_keys
+    import uiautomation as auto
 
     if not HWINFO_EXE.exists():
         log.error(f"Not found: {HWINFO_EXE}")
@@ -364,19 +351,20 @@ def run():
     if ret <= 32:
         raise RuntimeError(f"ShellExecuteW failed: {ret}")
 
-    app = connect_app()
+    connect_app()
 
     # --- BƯỚC 1: Startup dialog → Start ---
     log.info("Step 1: Startup dialog...")
-    startup = get_main_window(app, timeout=15)
-    for btn in startup.descendants(control_type="Button"):
-        if btn.window_text().strip().lower() == "start":
-            btn.click_input()
-            log.info("  Clicked: Start")
-            break
+    startup = get_main_window(timeout=15)
+    
+    # Click start button
+    start_btn = startup.ButtonControl(searchDepth=3, RegexName="(?i)start|run")
+    if start_btn.Exists(1, 1):
+        start_btn.Click()
+        log.info(f"  Clicked: '{start_btn.Name}'")
     else:
-        startup.set_focus()
-        send_keys("{ENTER}")
+        startup.SetFocus()
+        auto.SendKeys("{ENTER}")
 
     # --- BƯỚC 2: Đợi toolbar load ---
     log.info("Step 2: Waiting for main window to load...")
@@ -385,10 +373,10 @@ def run():
     while time.time() < deadline:
         time.sleep(1)
         try:
-            w = get_main_window(app, timeout=2)
-            btns = [b.window_text() for b in w.descendants(control_type="Button")]
-            if any("report" in b.lower() or "create" in b.lower() for b in btns):
-                log.info(f"  Ready: '{w.window_text()}'")
+            w = get_main_window(timeout=2)
+            # Check if report button exists
+            if w.ButtonControl(searchDepth=4, RegexName="(?i).*report.*|.*create.*").Exists(1, 1):
+                log.info(f"  Ready: '{w.Name}'")
                 main = w
                 break
         except Exception:
@@ -398,90 +386,56 @@ def run():
 
     # --- BƯỚC 3: Đóng System Summary ---
     log.info("Step 3: Closing System Summary...")
-    close_system_summary(app, main)
+    close_system_summary()
 
     # --- BƯỚC 4: Click "Create a Report File" ---
     log.info("Step 4: Create a Report File...")
-    main.set_focus()
+    main.SetFocus()
     time.sleep(0.3)
 
-    clicked = False
-    for btn in main.descendants(control_type="Button"):
-        label = btn.window_text().strip()
-        if "create" in label.lower() and "report" in label.lower():
-            btn.click_input()
-            log.info(f"  Clicked: '{label}'")
-            clicked = True
-            break
-    if not clicked:
-        toolbar = main.child_window(control_type="ToolBar")
-        btns = toolbar.descendants(control_type="Button")
-        btns[1].click_input()
-        log.info(f"  Toolbar[1]: '{btns[1].window_text()}'")
+    report_btn = main.ButtonControl(searchDepth=4, RegexName="(?i).*create.*report.*")
+    if report_btn.Exists(1, 1):
+        report_btn.Click()
+        log.info(f"  Clicked: '{report_btn.Name}'")
+    else:
+        # Fallback to toolbar
+        toolbar = main.ToolBarControl()
+        if toolbar.Exists(1, 1):
+            btns = toolbar.GetChildren()
+            if len(btns) > 1:
+                btns[1].Click()
+                log.info(f"  Toolbar[1]: '{btns[1].Name}'")
 
     # --- BƯỚC 5: Create Logfile dialog → JSON → Next → Finish ---
     log.info("Step 5: Create Logfile dialog...")
-    dlg = find_child_dialog(app, main, ["logfile", "create logfile", "report type"], timeout=15)
-
-    # HWiNFO radio buttons có thể là custom control, không phải RadioButton chuẩn
-    # Dump tất cả controls để tìm đúng type
-    log.debug("  All dialog controls:")
-    for ctrl in dlg.descendants():
-        t  = ctrl.window_text().strip()
-        ct = ctrl.element_info.control_type
-        if t:
-            log.debug(f"    [{ct}] '{t}'")
+    dlg = find_child_dialog(main, ["logfile", "create logfile", "report type"], timeout=15)
 
     json_selected = False
-
-    # Thử 1: RadioButton chuẩn
-    for ctrl in dlg.descendants(control_type="RadioButton"):
-        if ctrl.window_text().strip().lower() == "json":
-            ctrl.click_input()
-            log.info("  Selected (RadioButton): JSON")
-            json_selected = True
-            break
-
-    # Thử 2: CheckBox
-    if not json_selected:
-        for ctrl in dlg.descendants(control_type="CheckBox"):
-            if ctrl.window_text().strip().lower() == "json":
-                ctrl.click_input()
-                log.info("  Selected (CheckBox): JSON")
-                json_selected = True
-                break
-
-    # Thử 3: bất kỳ control nào text == "JSON"
-    if not json_selected:
-        for ctrl in dlg.descendants():
-            if ctrl.window_text().strip().lower() == "json":
-                try:
-                    ctrl.click_input()
-                    log.info(f"  Selected ({ctrl.element_info.control_type}): JSON")
-                    json_selected = True
-                    break
-                except Exception as e:
-                    log.debug(f"  click failed: {e}")
+    
+    json_ctrl = dlg.Control(searchDepth=3, Name="JSON")
+    if json_ctrl.Exists(1, 1):
+        json_ctrl.Click()
+        log.info(f"  Selected ({json_ctrl.ControlType}): JSON")
+        json_selected = True
 
     if not json_selected:
         log.warning("  JSON control not found — HWiNFO will use last saved format")
 
     time.sleep(0.3)
 
-    for btn in dlg.descendants(control_type="Button"):
-        if "next" in btn.window_text().lower():
-            btn.click_input()
-            log.info(f"  Clicked: '{btn.window_text()}'")
-            break
+    next_btn = dlg.ButtonControl(searchDepth=3, RegexName="(?i).*next.*")
+    if next_btn.Exists(1, 1):
+        next_btn.Click()
+        log.info(f"  Clicked: '{next_btn.Name}'")
 
     time.sleep(0.5)
 
     for _ in range(8):
-        for btn in dlg.descendants(control_type="Button"):
-            if "finish" in btn.window_text().lower():
-                btn.click_input()
-                log.info(f"  Clicked: '{btn.window_text()}'")
-                break
+        finish_btn = dlg.ButtonControl(searchDepth=3, RegexName="(?i).*finish.*")
+        if finish_btn.Exists(1, 1):
+            finish_btn.Click()
+            log.info(f"  Clicked: '{finish_btn.Name}'")
+            break
         else:
             time.sleep(0.5)
             continue
@@ -501,7 +455,8 @@ def run():
     # Đóng HWiNFO
     log.info("Closing HWiNFO...")
     try:
-        main.close()
+        main.SetFocus()
+        auto.SendKeys('!{F4}')
         time.sleep(2)
     except Exception:
         pass
